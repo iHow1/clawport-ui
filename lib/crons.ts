@@ -4,6 +4,16 @@ import { parseSchedule, describeCron } from './cron-utils'
 import { requireEnv } from '@/lib/env'
 import { loadRegistry } from '@/lib/agents-registry'
 
+const CRON_CACHE_TTL_MS = 5_000
+const CRON_CACHE_ENABLED = process.env.NODE_ENV !== 'test' && process.env.VITEST !== 'true'
+
+let cronCache:
+  | {
+      loadedAt: number
+      value: CronJob[]
+    }
+  | null = null
+
 /**
  * Match a cron job name to an agent by prefix.
  * Tries each known agent ID as a prefix (longest first to avoid
@@ -18,6 +28,14 @@ function matchAgent(name: string, agentIds: string[]): string | null {
 }
 
 export async function getCrons(): Promise<CronJob[]> {
+  if (
+    CRON_CACHE_ENABLED
+    && cronCache
+    && Date.now() - cronCache.loadedAt < CRON_CACHE_TTL_MS
+  ) {
+    return cronCache.value
+  }
+
   try {
     const openclawBin = requireEnv('OPENCLAW_BIN')
     const raw = execSync(`${openclawBin} cron list --json`, {
@@ -33,7 +51,7 @@ export async function getCrons(): Promise<CronJob[]> {
     // Load known agent IDs for dynamic cron-to-agent matching
     const agentIds = loadRegistry().map(a => a.id)
 
-    return jobs.map((job: unknown) => {
+    const crons = jobs.map((job: unknown) => {
       const j = job as Record<string, unknown>
       const state = (j.state as Record<string, unknown>) || {}
       const name = String(j.name || '')
@@ -97,6 +115,14 @@ export async function getCrons(): Promise<CronJob[]> {
         lastDeliveryStatus,
       }
     })
+
+    if (CRON_CACHE_ENABLED) {
+      cronCache = {
+        loadedAt: Date.now(),
+        value: crons,
+      }
+    }
+    return crons
   } catch (err) {
     throw new Error(
       `Failed to fetch cron jobs: ${err instanceof Error ? err.message : String(err)}`

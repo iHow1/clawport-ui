@@ -2,7 +2,13 @@ export const runtime = 'nodejs'
 
 import { getAgent } from '@/lib/agents'
 import { validateChatMessages } from '@/lib/validation'
-import { hasImageContent, extractImageAttachments, buildTextPrompt, sendViaOpenClaw } from '@/lib/anthropic'
+import {
+  hasImageContent,
+  extractImageAttachments,
+  buildTextPrompt,
+  createOpenClawRequestScope,
+  sendViaOpenClaw,
+} from '@/lib/anthropic'
 import OpenAI from 'openai'
 import { gatewayBaseUrl } from '@/lib/env'
 
@@ -13,6 +19,10 @@ const openai = new OpenAI({
 })
 
 const GATEWAY_TOKEN = process.env.OPENCLAW_GATEWAY_TOKEN || ''
+
+function isCodexChatTransport(model: string | null | undefined): boolean {
+  return typeof model === 'string' && model.startsWith('openai-codex/')
+}
 
 export async function POST(
   request: Request,
@@ -50,6 +60,7 @@ export async function POST(
 
   const rawBody = body as Record<string, unknown>
   const operatorName = typeof rawBody.operatorName === 'string' ? rawBody.operatorName : 'Operator'
+  const rawRequestId = typeof rawBody.requestId === 'string' ? rawBody.requestId : undefined
 
   const systemPrompt = agent.soul
     ? `${agent.soul}\n\nYou are speaking directly with ${operatorName}, your operator. Stay fully in character. Be concise — this is a live chat. 2-4 sentences unless detail is asked for. No em dashes.`
@@ -60,23 +71,35 @@ export async function POST(
   // should not force all future messages through this path.
   const lastUserMsg = [...messages].reverse().find(m => m.role === 'user')
   const latestHasImages = lastUserMsg ? hasImageContent([lastUserMsg]) : false
+  const useGatewaySendPoll = latestHasImages || isCodexChatTransport(agent.model)
 
-  if (latestHasImages && GATEWAY_TOKEN) {
-    const attachments = extractImageAttachments([lastUserMsg!])
+  if (useGatewaySendPoll && GATEWAY_TOKEN) {
+    const attachments = latestHasImages && lastUserMsg
+      ? extractImageAttachments([lastUserMsg])
+      : []
     const textPrompt = buildTextPrompt(systemPrompt, messages)
+    const scope = createOpenClawRequestScope(`agent:${id}:clawport`, rawRequestId)
 
     const response = await sendViaOpenClaw({
       gatewayToken: GATEWAY_TOKEN,
       message: textPrompt,
       attachments,
+      sessionKey: scope.sessionKey,
+      idempotencyKey: scope.idempotencyKey,
     })
 
     // Return as a non-streaming SSE response (complete text at once)
     const encoder = new TextEncoder()
-    const content = response || 'I had trouble processing that image. Could you try again or describe what you see?'
     const streamBody = new ReadableStream({
       start(controller) {
-        controller.enqueue(encoder.encode(`data: ${JSON.stringify({ content })}\n\n`))
+        if (response) {
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify({ content: response, requestId: scope.requestId })}\n\n`))
+        } else {
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify({
+            error: 'Temporary connection issue while waiting for the reply.',
+            requestId: scope.requestId,
+          })}\n\n`))
+        }
         controller.enqueue(encoder.encode('data: [DONE]\n\n'))
         controller.close()
       },

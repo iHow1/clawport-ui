@@ -9,9 +9,30 @@ export async function GET(request: Request) {
   let child: ReturnType<typeof spawn> | null = null
   let heartbeat: ReturnType<typeof setInterval> | null = null
   let lifetime: ReturnType<typeof setTimeout> | null = null
+  let closed = false
 
   const stream = new ReadableStream({
     start(controller) {
+      function send(event: string | null, payload: string) {
+        if (closed) return
+        const prefix = event ? `event: ${event}\n` : ''
+        try {
+          controller.enqueue(encoder.encode(`${prefix}data: ${payload}\n\n`))
+        } catch {
+          closed = true
+        }
+      }
+
+      function closeStream() {
+        if (closed) return
+        closed = true
+        try {
+          controller.close()
+        } catch {
+          // Stream is already closed.
+        }
+      }
+
       const openclawBin = requireEnv('OPENCLAW_BIN')
 
       try {
@@ -20,8 +41,8 @@ export async function GET(request: Request) {
         })
       } catch (err) {
         const msg = err instanceof Error ? err.message : 'Failed to spawn openclaw'
-        controller.enqueue(encoder.encode(`event: error\ndata: ${JSON.stringify({ error: msg })}\n\n`))
-        controller.close()
+        send('error', JSON.stringify({ error: msg }))
+        closeStream()
         return
       }
 
@@ -33,55 +54,52 @@ export async function GET(request: Request) {
         buffer = lines.pop() || ''
         for (const line of lines) {
           if (!line.trim()) continue
-          controller.enqueue(encoder.encode(`data: ${line}\n\n`))
+          send(null, line)
         }
       })
 
       child.stderr?.on('data', (chunk: Buffer) => {
         const msg = chunk.toString().trim()
         if (msg) {
-          controller.enqueue(encoder.encode(`event: error\ndata: ${JSON.stringify({ error: msg })}\n\n`))
+          send('error', JSON.stringify({ error: msg }))
         }
       })
 
       child.on('error', (err) => {
-        controller.enqueue(encoder.encode(`event: error\ndata: ${JSON.stringify({ error: err.message })}\n\n`))
+        send('error', JSON.stringify({ error: err.message }))
         cleanup()
-        controller.close()
+        closeStream()
       })
 
       child.on('close', (code) => {
         if (code !== null && code !== 0) {
-          controller.enqueue(encoder.encode(`event: error\ndata: ${JSON.stringify({ error: `Process exited with code ${code}` })}\n\n`))
+          send('error', JSON.stringify({ error: `Process exited with code ${code}` }))
         }
         cleanup()
-        controller.close()
+        closeStream()
       })
 
       // Heartbeat to prevent proxy timeouts
       heartbeat = setInterval(() => {
+        if (closed) return
         try {
           controller.enqueue(encoder.encode(`: heartbeat\n\n`))
         } catch {
-          // Controller may be closed
+          closed = true
         }
       }, HEARTBEAT_INTERVAL_MS)
 
       // Max lifetime safety valve
       lifetime = setTimeout(() => {
         cleanup()
-        try {
-          controller.enqueue(encoder.encode(`event: error\ndata: ${JSON.stringify({ error: 'Stream max lifetime reached' })}\n\n`))
-          controller.close()
-        } catch {
-          // Already closed
-        }
+        send('error', JSON.stringify({ error: 'Stream max lifetime reached' }))
+        closeStream()
       }, MAX_LIFETIME_MS)
 
       // Cleanup on client disconnect
       request.signal.addEventListener('abort', () => {
         cleanup()
-        try { controller.close() } catch { /* already closed */ }
+        closeStream()
       })
 
       function cleanup() {

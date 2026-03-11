@@ -14,6 +14,16 @@ const DISCOVER_COLORS = [
   '#06b6d4', '#ec4899', '#84cc16', '#8b5cf6', '#ef4444',
 ]
 
+const REGISTRY_CACHE_TTL_MS = 5_000
+const REGISTRY_CACHE_ENABLED = process.env.NODE_ENV !== 'test' && process.env.VITEST !== 'true'
+
+let registryCache:
+  | {
+      loadedAt: number
+      value: AgentEntry[]
+    }
+  | null = null
+
 // ---------------------------------------------------------------------------
 // Heading / identity extraction helpers (exported for testing)
 // ---------------------------------------------------------------------------
@@ -540,8 +550,17 @@ function enrichModelsFromCli(
  *   4. Bundled lib/agents.json               (default example registry)
  */
 export function loadRegistry(): AgentEntry[] {
+  if (
+    REGISTRY_CACHE_ENABLED
+    && registryCache
+    && Date.now() - registryCache.loadedAt < REGISTRY_CACHE_TTL_MS
+  ) {
+    return registryCache.value
+  }
+
   const workspacePath = process.env.WORKSPACE_PATH
   const openclawBin = process.env.OPENCLAW_BIN
+  let resolved: AgentEntry[] | null = null
 
   if (workspacePath) {
     // 1. User-provided override
@@ -549,37 +568,51 @@ export function loadRegistry(): AgentEntry[] {
     if (existsSync(userRegistryPath)) {
       try {
         const raw = readFileSync(userRegistryPath, 'utf-8')
-        return JSON.parse(raw) as AgentEntry[]
+        resolved = JSON.parse(raw) as AgentEntry[]
       } catch {
         // Malformed user JSON -- fall through
       }
     }
 
-    // 2. Auto-discover from primary workspace filesystem
-    const discovered = discoverAgents(workspacePath)
+    if (!resolved) {
+      // 2. Auto-discover from primary workspace filesystem
+      const discovered = discoverAgents(workspacePath)
 
-    // 2b. Enrich with CLI model data + merge other workspaces
-    if (discovered && openclawBin) {
-      const cliAgents = listCliAgents(openclawBin)
-      if (cliAgents) {
-        enrichModelsFromCli(discovered, cliAgents, workspacePath)
-        if (cliAgents.length > 1) {
-          return mergeExtraWorkspaces(discovered, cliAgents, workspacePath)
+      // 2b. Enrich with CLI model data + merge other workspaces
+      if (discovered && openclawBin) {
+        const cliAgents = listCliAgents(openclawBin)
+        if (cliAgents) {
+          enrichModelsFromCli(discovered, cliAgents, workspacePath)
+          resolved = cliAgents.length > 1
+            ? mergeExtraWorkspaces(discovered, cliAgents, workspacePath)
+            : discovered
+        } else {
+          resolved = discovered
         }
+      } else if (discovered) {
+        resolved = discovered
       }
-      return discovered
-    }
-    if (discovered) return discovered
 
-    // 3. CLI-only: no primary workspace agents, scan each CLI agent's workspace
-    if (openclawBin) {
-      const cliAgents = listCliAgents(openclawBin)
-      if (cliAgents) {
-        return mergeExtraWorkspaces([], cliAgents, '')
+      // 3. CLI-only: no primary workspace agents, scan each CLI agent's workspace
+      if (!resolved && openclawBin) {
+        const cliAgents = listCliAgents(openclawBin)
+        if (cliAgents) {
+          resolved = mergeExtraWorkspaces([], cliAgents, '')
+        }
       }
     }
   }
 
-  // 4. Bundled fallback
-  return bundledRegistry as AgentEntry[]
+  if (!resolved) {
+    // 4. Bundled fallback
+    resolved = bundledRegistry as AgentEntry[]
+  }
+
+  if (REGISTRY_CACHE_ENABLED) {
+    registryCache = {
+      loadedAt: Date.now(),
+      value: resolved,
+    }
+  }
+  return resolved
 }

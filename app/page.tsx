@@ -11,6 +11,7 @@ import { AgentAvatar } from "@/components/AgentAvatar"
 import { GridView } from "@/components/GridView"
 import { FeedView } from "@/components/FeedView"
 import { useSettings } from "@/app/settings-provider"
+import { fetchAgentsCached, fetchCronsCached } from "@/lib/client-api"
 import { localizeAgentDescription } from "@/lib/i18n"
 
 const OrgMap = dynamic(
@@ -127,18 +128,16 @@ export default function HomePage() {
     setLoading(true)
     setError(null)
     Promise.all([
-      fetch("/api/agents").then((r) => {
-        if (!r.ok) throw new Error(homeCopy.errors.fetchAgents)
-        return r.json()
+      fetchAgentsCached().catch(() => {
+        throw new Error(homeCopy.errors.fetchAgents)
       }),
-      fetch("/api/crons").then((r) => {
-        if (!r.ok) throw new Error(homeCopy.errors.fetchCrons)
-        return r.json()
+      fetchCronsCached().catch(() => {
+        throw new Error(homeCopy.errors.fetchCrons)
       }),
     ])
       .then(([a, cronData]) => {
         setAgents(a)
-        setCrons(Array.isArray(cronData) ? cronData : cronData.crons ?? [])
+        setCrons(cronData.crons)
       })
       .catch((e) => setError(e.message))
       .finally(() => setLoading(false))

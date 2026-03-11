@@ -14,6 +14,7 @@ import {
 } from 'lucide-react';
 import type { Agent, CronJob } from '@/lib/types';
 import { useSettings } from '@/app/settings-provider';
+import { fetchAgentsCached, fetchCronsCached } from '@/lib/client-api';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -147,24 +148,12 @@ export function GlobalSearch() {
     setQuery('');
     setActiveIndex(0);
     // Fetch agents
-    fetch('/api/agents')
-      .then((r) => {
-        if (!r.ok) throw new Error(`HTTP ${r.status}`);
-        return r.json();
-      })
-      .then((data: unknown) => {
-        if (Array.isArray(data)) setAgents(data as Agent[]);
-      })
+    fetchAgentsCached()
+      .then((data) => setAgents(data))
       .catch(() => setAgents([]));
     // Fetch crons
-    fetch('/api/crons')
-      .then((r) => {
-        if (!r.ok) throw new Error(`HTTP ${r.status}`);
-        return r.json();
-      })
-      .then((data: unknown) => {
-        setCrons(Array.isArray(data) ? data as CronJob[] : (data as { crons?: CronJob[] })?.crons ?? []);
-      })
+    fetchCronsCached()
+      .then(({ crons }) => setCrons(crons))
       .catch(() => setCrons([]));
   }, [open]);
 

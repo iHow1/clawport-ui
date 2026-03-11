@@ -1,4 +1,4 @@
-import { readFileSync, appendFileSync, mkdirSync, existsSync, unlinkSync, readdirSync, writeFileSync } from 'fs'
+import { readFileSync, mkdirSync, existsSync, unlinkSync, readdirSync, writeFileSync } from 'fs'
 import path from 'path'
 import { requireEnv } from '@/lib/env'
 
@@ -83,9 +83,10 @@ export function getMessages(agentId: string): StoredMessage[] {
 }
 
 /**
- * Append conversation messages to an agent's JSONL file.
+ * Upsert conversation messages for an agent's JSONL file.
  * Creates the directory and file if they don't exist.
- * Deduplicates by message ID to prevent duplicates on retry.
+ * Existing messages with the same ID are replaced so streaming assistant
+ * placeholders can be updated with their final content.
  */
 export function appendMessages(agentId: string, messages: StoredMessage[]): void {
   validateAgentId(agentId)
@@ -93,22 +94,39 @@ export function appendMessages(agentId: string, messages: StoredMessage[]): void
   mkdirSync(dir, { recursive: true })
 
   const filePath = path.join(dir, `${agentId}.jsonl`)
-
-  let newMessages = messages
+  const byId = new Map<string, StoredMessage>()
   if (existsSync(filePath)) {
     const existing = getMessages(agentId)
-    const existingIds = new Set(existing.map(m => m.id))
-    newMessages = messages.filter(m => !existingIds.has(m.id))
-    if (newMessages.length === 0) return
+    for (const message of existing) {
+      byId.set(message.id, message)
+    }
   }
-  const lines = newMessages.map(m => JSON.stringify({
+
+  let changed = false
+  for (const message of messages) {
+    const prev = byId.get(message.id)
+    if (
+      !prev ||
+      prev.content !== message.content ||
+      prev.role !== message.role ||
+      prev.timestamp !== message.timestamp
+    ) {
+      byId.set(message.id, message)
+      changed = true
+    }
+  }
+
+  if (!changed) return
+
+  const mergedMessages = [...byId.values()].sort((a, b) => a.timestamp - b.timestamp)
+  const lines = mergedMessages.map(m => JSON.stringify({
     id: m.id,
     role: m.role,
     content: m.content,
     timestamp: m.timestamp,
   }))
 
-  appendFileSync(filePath, lines.join('\n') + '\n', 'utf-8')
+  writeFileSync(filePath, lines.join('\n') + '\n', 'utf-8')
 }
 
 /** Delete an agent's conversation file. */

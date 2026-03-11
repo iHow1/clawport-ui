@@ -16,6 +16,12 @@ export interface OpenClawAttachment {
   content: string // base64
 }
 
+export interface OpenClawRequestScope {
+  requestId: string
+  sessionKey: string
+  idempotencyKey: string
+}
+
 /**
  * Check if any message in the array contains image_url content parts.
  */
@@ -99,6 +105,23 @@ export function execCli(
   })
 }
 
+function sanitizeRequestId(value: string): string {
+  const normalized = value.trim().replace(/[^a-zA-Z0-9_-]+/g, '-').replace(/^-+|-+$/g, '')
+  return normalized || 'request'
+}
+
+export function createOpenClawRequestScope(prefix: string, requestId?: string): OpenClawRequestScope {
+  const normalizedPrefix = prefix.replace(/[^a-zA-Z0-9:_-]+/g, '-').replace(/:-+/g, ':')
+  const normalizedRequestId = sanitizeRequestId(
+    requestId || `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+  )
+  return {
+    requestId: normalizedRequestId,
+    sessionKey: `${normalizedPrefix}:${normalizedRequestId}`,
+    idempotencyKey: `clawport-${normalizedRequestId}`,
+  }
+}
+
 /**
  * Send a vision message through the OpenClaw gateway via CLI.
  *
@@ -114,12 +137,13 @@ export async function sendViaOpenClaw(opts: {
   gatewayToken: string
   message: string
   attachments: OpenClawAttachment[]
-  sessionKey?: string
+  sessionKey: string
+  idempotencyKey?: string
   timeoutMs?: number
 }): Promise<string | null> {
   const openclawBin = process.env.OPENCLAW_BIN || 'openclaw'
-  const sessionKey = opts.sessionKey || 'agent:main:clawport'
-  const idempotencyKey = `clawport-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+  const sessionKey = opts.sessionKey
+  const idempotencyKey = opts.idempotencyKey || `clawport-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
   const timeoutMs = opts.timeoutMs || 60000
   const token = opts.gatewayToken
 
@@ -179,18 +203,24 @@ export async function sendViaOpenClaw(opts: {
       const messages = history.messages || []
       if (messages.length === 0) continue
 
-      const lastMsg = messages[messages.length - 1]
+      // Scan backward because newer user messages can arrive before we poll,
+      // and the latest history entry is not guaranteed to be the assistant reply
+      // for this request.
+      for (let i = messages.length - 1; i >= 0; i--) {
+        const message = messages[i]
+        if (message.role !== 'assistant' || message.timestamp < sendTs) continue
 
-      // Wait for an assistant message that arrived after we sent
-      if (lastMsg.role === 'assistant' && lastMsg.timestamp >= sendTs) {
-        const content = lastMsg.content
-        if (typeof content === 'string') return content
+        const content = message.content
+        if (typeof content === 'string' && content.trim()) {
+          return content
+        }
         if (Array.isArray(content)) {
           const textParts = content
             .filter((p: { type: string }) => p.type === 'text')
             .map((p: { text: string }) => p.text)
             .join('\n')
-          return textParts || null
+            .trim()
+          if (textParts) return textParts
         }
       }
     } catch {

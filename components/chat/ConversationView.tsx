@@ -385,7 +385,11 @@ export function ConversationView({ agent, conversation, onUpdate, onBack }: Conv
       const res = await fetch(`/api/chat/${agent.id}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ messages: apiMessages, operatorName: settings.operatorName }),
+        body: JSON.stringify({
+          messages: apiMessages,
+          operatorName: settings.operatorName,
+          requestId: assistantMsgId,
+        }),
       })
 
       if (!res.ok || !res.body) throw new Error('Stream failed')
@@ -405,6 +409,9 @@ export function ConversationView({ agent, conversation, onUpdate, onBack }: Conv
           if (line.startsWith('data: ') && line !== 'data: [DONE]') {
             try {
               const chunk = JSON.parse(line.slice(6))
+              if (chunk.error) {
+                throw new Error(String(chunk.error))
+              }
               if (chunk.content) {
                 fullContent += chunk.content
                 const capturedContent = fullContent
@@ -414,8 +421,7 @@ export function ConversationView({ agent, conversation, onUpdate, onBack }: Conv
           }
         }
       }
-
-      const finalContent = fullContent
+      const finalContent = fullContent || copy.chat.responseError
       onUpdate(agent.id, prev => updateLastMessage(prev, agent.id, assistantMsgId, finalContent, false))
     } catch {
       onUpdate(agent.id, prev => updateLastMessage(prev, agent.id, assistantMsgId, copy.chat.responseError, false))

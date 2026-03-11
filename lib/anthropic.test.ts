@@ -4,6 +4,7 @@ import {
   hasImageContent,
   extractImageAttachments,
   buildTextPrompt,
+  createOpenClawRequestScope,
   sendViaOpenClaw,
   execCli,
 } from './anthropic'
@@ -223,6 +224,23 @@ describe('execCli', () => {
   })
 })
 
+// --- createOpenClawRequestScope ---
+
+describe('createOpenClawRequestScope', () => {
+  it('builds a scoped request/session identity from a provided request id', () => {
+    const scope = createOpenClawRequestScope('agent:matt-horner:clawport', 'assistant-123')
+    expect(scope.requestId).toBe('assistant-123')
+    expect(scope.sessionKey).toBe('agent:matt-horner:clawport:assistant-123')
+    expect(scope.idempotencyKey).toBe('clawport-assistant-123')
+  })
+
+  it('sanitizes request ids for session-safe keys', () => {
+    const scope = createOpenClawRequestScope('agent:matt-horner:clawport', 'assistant 123 / test')
+    expect(scope.requestId).toBe('assistant-123-test')
+    expect(scope.sessionKey).toBe('agent:matt-horner:clawport:assistant-123-test')
+  })
+})
+
 // --- sendViaOpenClaw ---
 
 describe('sendViaOpenClaw', () => {
@@ -290,6 +308,7 @@ describe('sendViaOpenClaw', () => {
       gatewayToken: 'test-token',
       message: 'describe this image',
       attachments: [{ mimeType: 'image/png', content: 'base64data' }],
+      sessionKey: 'agent:test:chat:req-1',
     })
 
     expect(result).toBe('I see a Discord bot profile for Jarvis.')
@@ -311,6 +330,7 @@ describe('sendViaOpenClaw', () => {
       gatewayToken: 'test-token',
       message: 'test',
       attachments: [],
+      sessionKey: 'agent:test:chat:req-2',
     })
 
     expect(result).toBeNull()
@@ -330,6 +350,7 @@ describe('sendViaOpenClaw', () => {
       gatewayToken: 'test-token',
       message: 'test',
       attachments: [],
+      sessionKey: 'agent:test:chat:req-3',
     })
 
     expect(result).toBeNull()
@@ -415,8 +436,48 @@ describe('sendViaOpenClaw', () => {
       gatewayToken: 'tok',
       message: 'hi',
       attachments: [],
+      sessionKey: 'agent:test:chat:req-4',
     })
 
     expect(result).toBe('plain string response')
+  })
+
+  it('finds the matching assistant reply even when newer user messages exist', async () => {
+    let historyPolls = 0
+    vi.mocked(mockExecFile).mockImplementation((_cmd, args, _opts, cb) => {
+      const argsArr = args as string[]
+      if (argsArr.includes('chat.send')) {
+        ;(cb as (err: Error | null, stdout: string, stderr: string) => void)(
+          null,
+          JSON.stringify({ runId: 'r1', status: 'started' }),
+          ''
+        )
+      } else {
+        historyPolls++
+        const sendTs = Date.now()
+        const messages = historyPolls === 1
+          ? [
+              { role: 'user', content: [{ type: 'text', text: 'older' }], timestamp: sendTs - 5000 },
+              { role: 'assistant', content: [{ type: 'text', text: 'target reply' }], timestamp: sendTs + 10 },
+              { role: 'user', content: [{ type: 'text', text: 'newer follow-up' }], timestamp: sendTs + 20 },
+            ]
+          : []
+        ;(cb as (err: Error | null, stdout: string, stderr: string) => void)(
+          null,
+          JSON.stringify({ messages }),
+          ''
+        )
+      }
+      return {} as ReturnType<typeof mockExecFile>
+    })
+
+    const result = await sendViaOpenClaw({
+      gatewayToken: 'tok',
+      message: 'hi',
+      attachments: [],
+      sessionKey: 'agent:test:chat:req-5',
+    })
+
+    expect(result).toBe('target reply')
   })
 })

@@ -3,11 +3,18 @@ export const runtime = 'nodejs'
 import { getAgent } from '@/lib/agents'
 import OpenAI from 'openai'
 import { gatewayBaseUrl } from '@/lib/env'
+import { createOpenClawRequestScope, sendViaOpenClaw } from '@/lib/anthropic'
 
 const openai = new OpenAI({
   baseURL: gatewayBaseUrl(),
   apiKey: process.env.OPENCLAW_GATEWAY_TOKEN,
 })
+
+const GATEWAY_TOKEN = process.env.OPENCLAW_GATEWAY_TOKEN || ''
+
+function isCodexChatTransport(model: string | null | undefined): boolean {
+  return typeof model === 'string' && model.startsWith('openai-codex/')
+}
 
 const MAX_TITLE = 500
 const MAX_DESC = 5000
@@ -48,6 +55,8 @@ export async function POST(
   }
 
   const rawMessages = body.messages
+  const rawBody = body as Record<string, unknown>
+  const rawRequestId = typeof rawBody.requestId === 'string' ? rawBody.requestId : undefined
   if (!Array.isArray(rawMessages) || !rawMessages.every(isValidMessage)) {
     return new Response(
       JSON.stringify({ error: 'messages must be an array of {role, content} objects' }),
@@ -87,6 +96,46 @@ Help the user with this ticket. Stay in character as ${agent.name}, ${agent.titl
   const systemPrompt = agent.soul
     ? `${agent.soul}\n\n${ticketContext}`
     : ticketContext
+
+  if (isCodexChatTransport(agent.model) && GATEWAY_TOKEN) {
+    const scope = createOpenClawRequestScope(`agent:${id}:kanban`, rawRequestId)
+    const promptParts = [systemPrompt]
+    for (const message of messages) {
+      promptParts.push(`${message.role}: ${message.content}`)
+    }
+
+    const response = await sendViaOpenClaw({
+      gatewayToken: GATEWAY_TOKEN,
+      message: promptParts.join('\n\n'),
+      attachments: [],
+      sessionKey: scope.sessionKey,
+      idempotencyKey: scope.idempotencyKey,
+    })
+
+    const encoder = new TextEncoder()
+    const streamBody = new ReadableStream({
+      start(controller) {
+        if (response) {
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify({ content: response, requestId: scope.requestId })}\n\n`))
+        } else {
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify({
+            error: 'Temporary connection issue while waiting for the reply.',
+            requestId: scope.requestId,
+          })}\n\n`))
+        }
+        controller.enqueue(encoder.encode('data: [DONE]\n\n'))
+        controller.close()
+      },
+    })
+
+    return new Response(streamBody, {
+      headers: {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        Connection: 'keep-alive',
+      },
+    })
+  }
 
   try {
     const stream = await openai.chat.completions.create({

@@ -11,6 +11,10 @@ import {
   fetchConversation, syncToServer, fromStoredMessage,
 } from '@/lib/conversations'
 
+function messageFingerprint(message: Message): string {
+  return `${message.role}:${message.timestamp}:${message.content}`
+}
+
 function MessengerApp() {
   const router = useRouter()
   const searchParams = useSearchParams()
@@ -30,7 +34,9 @@ function MessengerApp() {
 
   // Load conversations from localStorage
   useEffect(() => {
-    setConversations(loadConversations())
+    const loaded = loadConversations()
+    prevConversationsRef.current = loaded
+    setConversations(loaded)
   }, [])
 
   // Save conversations whenever they change (localStorage + server sync)
@@ -39,17 +45,18 @@ function MessengerApp() {
     if (Object.keys(conversations).length > 0) {
       saveConversations(conversations)
 
-      // Sync only new messages to server (fire-and-forget)
+      // Sync new messages and streamed content updates to the server.
       const prev = prevConversationsRef.current
       for (const agentId of Object.keys(conversations)) {
         const prevMsgs = prev[agentId]?.messages || []
         const currMsgs = conversations[agentId]?.messages || []
-        if (currMsgs.length > prevMsgs.length) {
-          const prevIds = new Set(prevMsgs.map((m: Message) => m.id))
-          const newMsgs = currMsgs.filter((m: Message) => !prevIds.has(m.id))
-          if (newMsgs.length > 0) {
-            syncToServer(agentId, newMsgs)
-          }
+        const prevById = new Map(prevMsgs.map((m: Message) => [m.id, m]))
+        const changedMsgs = currMsgs.filter((msg: Message) => {
+          const prevMsg = prevById.get(msg.id)
+          return !prevMsg || messageFingerprint(prevMsg) !== messageFingerprint(msg)
+        })
+        if (changedMsgs.length > 0) {
+          syncToServer(agentId, changedMsgs)
         }
       }
       prevConversationsRef.current = conversations
@@ -82,15 +89,22 @@ function MessengerApp() {
               lastActivity: serverMsgs[serverMsgs.length - 1].timestamp,
             }
           } else {
-            // Merge by message ID, sort by timestamp
-            const existingIds = new Set(existing.messages.map((m: Message) => m.id))
-            const newFromServer = serverMsgs
-              .filter(m => !existingIds.has(m.id))
-              .map(fromStoredMessage)
-            if (newFromServer.length > 0) {
-              const allMessages = [...existing.messages, ...newFromServer]
-                .sort((a, b) => a.timestamp - b.timestamp)
-              merged[agentId] = { ...existing, messages: allMessages }
+            const mergedById = new Map(existing.messages.map((m: Message) => [m.id, m]))
+            let changed = false
+            for (const serverMsg of serverMsgs.map(fromStoredMessage)) {
+              const prevMsg = mergedById.get(serverMsg.id)
+              if (!prevMsg || messageFingerprint(prevMsg) !== messageFingerprint(serverMsg)) {
+                mergedById.set(serverMsg.id, serverMsg)
+                changed = true
+              }
+            }
+            if (changed) {
+              const allMessages = [...mergedById.values()].sort((a, b) => a.timestamp - b.timestamp)
+              merged[agentId] = {
+                ...existing,
+                messages: allMessages,
+                lastActivity: allMessages[allMessages.length - 1]?.timestamp ?? existing.lastActivity,
+              }
             }
           }
         }

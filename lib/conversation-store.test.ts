@@ -3,7 +3,6 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 
 const {
   mockReadFileSync,
-  mockAppendFileSync,
   mockMkdirSync,
   mockExistsSync,
   mockUnlinkSync,
@@ -11,7 +10,6 @@ const {
   mockWriteFileSync,
 } = vi.hoisted(() => ({
   mockReadFileSync: vi.fn(),
-  mockAppendFileSync: vi.fn(),
   mockMkdirSync: vi.fn(),
   mockExistsSync: vi.fn(),
   mockUnlinkSync: vi.fn(),
@@ -21,7 +19,6 @@ const {
 
 vi.mock('fs', () => ({
   readFileSync: mockReadFileSync,
-  appendFileSync: mockAppendFileSync,
   mkdirSync: mockMkdirSync,
   existsSync: mockExistsSync,
   unlinkSync: mockUnlinkSync,
@@ -29,7 +26,6 @@ vi.mock('fs', () => ({
   writeFileSync: mockWriteFileSync,
   default: {
     readFileSync: mockReadFileSync,
-    appendFileSync: mockAppendFileSync,
     mkdirSync: mockMkdirSync,
     existsSync: mockExistsSync,
     unlinkSync: mockUnlinkSync,
@@ -142,7 +138,7 @@ describe('appendMessages', () => {
     mockExistsSync.mockReturnValue(false)
   })
 
-  it('creates directory and appends messages as JSONL', () => {
+  it('creates directory and writes messages as JSONL', () => {
     const messages: StoredMessage[] = [
       { id: 'a', role: 'user', content: 'hello', timestamp: 1000 },
       { id: 'b', role: 'assistant', content: 'hi there', timestamp: 2000 },
@@ -155,7 +151,7 @@ describe('appendMessages', () => {
       { recursive: true },
     )
 
-    const written = mockAppendFileSync.mock.calls[0][1] as string
+    const written = mockWriteFileSync.mock.calls[0][1] as string
     const lines = written.trim().split('\n')
     expect(lines).toHaveLength(2)
     expect(JSON.parse(lines[0])).toEqual({ id: 'a', role: 'user', content: 'hello', timestamp: 1000 })
@@ -169,7 +165,7 @@ describe('appendMessages', () => {
 
     appendMessages('agent-2', messages)
 
-    const written = mockAppendFileSync.mock.calls[0][1] as string
+    const written = mockWriteFileSync.mock.calls[0][1] as string
     expect(written).toBe('{"id":"x","role":"user","content":"test","timestamp":5000}\n')
   })
 
@@ -178,25 +174,39 @@ describe('appendMessages', () => {
       { id: 'a', role: 'user', content: 'hi', timestamp: 1000 },
     ])
 
-    const filePath = mockAppendFileSync.mock.calls[0][0] as string
+    const filePath = mockWriteFileSync.mock.calls[0][0] as string
     expect(filePath).toContain('my-agent-id.jsonl')
   })
 
-  it('deduplicates against existing messages', () => {
+  it('upserts existing messages with the same id', () => {
     mockExistsSync.mockReturnValue(true)
     mockReadFileSync.mockReturnValue(
-      JSON.stringify({ id: 'a', role: 'user', content: 'exists', timestamp: 1000 })
+      JSON.stringify({ id: 'a', role: 'assistant', content: '', timestamp: 1000 })
     )
 
     appendMessages('agent-1', [
-      { id: 'a', role: 'user', content: 'exists', timestamp: 1000 },
+      { id: 'a', role: 'assistant', content: 'filled later', timestamp: 1000 },
       { id: 'b', role: 'assistant', content: 'new', timestamp: 2000 },
     ])
 
-    const written = mockAppendFileSync.mock.calls[0][1] as string
+    const written = mockWriteFileSync.mock.calls[0][1] as string
     const lines = written.trim().split('\n')
-    expect(lines).toHaveLength(1)
-    expect(JSON.parse(lines[0]).id).toBe('b')
+    expect(lines).toHaveLength(2)
+    expect(JSON.parse(lines[0])).toEqual({ id: 'a', role: 'assistant', content: 'filled later', timestamp: 1000 })
+    expect(JSON.parse(lines[1])).toEqual({ id: 'b', role: 'assistant', content: 'new', timestamp: 2000 })
+  })
+
+  it('does not rewrite when nothing changed', () => {
+    mockExistsSync.mockReturnValue(true)
+    mockReadFileSync.mockReturnValue(
+      JSON.stringify({ id: 'a', role: 'assistant', content: 'same', timestamp: 1000 })
+    )
+
+    appendMessages('agent-1', [
+      { id: 'a', role: 'assistant', content: 'same', timestamp: 1000 },
+    ])
+
+    expect(mockWriteFileSync).not.toHaveBeenCalled()
   })
 })
 

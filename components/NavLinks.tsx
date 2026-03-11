@@ -5,8 +5,8 @@ import { usePathname } from 'next/navigation';
 import { useEffect, useState } from 'react';
 import { Map, MessageSquare, Clock, Activity, Brain, Columns3, BookOpen, Settings, DollarSign } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
-import type { CronJob } from '@/lib/types';
 import { useSettings } from '@/app/settings-provider';
+import { fetchAgentsCached, fetchCronsCached } from '@/lib/client-api';
 
 function getInitials(name: string | null): string {
   if (!name) return '??'
@@ -51,15 +51,9 @@ export function NavLinks({ bottomSlot }: { bottomSlot?: React.ReactNode } = {}) 
 
   // Fetch agent count
   useEffect(() => {
-    fetch('/api/agents')
-      .then((r) => {
-        if (!r.ok) throw new Error(`HTTP ${r.status}`);
-        return r.json();
-      })
-      .then((data: unknown) => {
-        if (Array.isArray(data)) {
-          setAgentCount(data.length);
-        }
+    fetchAgentsCached()
+      .then((data) => {
+        setAgentCount(data.length);
       })
       .catch(() => {
         setAgentCount(null);
@@ -68,15 +62,8 @@ export function NavLinks({ bottomSlot }: { bottomSlot?: React.ReactNode } = {}) 
 
   // Fetch cron error count
   useEffect(() => {
-    fetch('/api/crons')
-      .then((r) => {
-        if (!r.ok) throw new Error(`HTTP ${r.status}`);
-        return r.json();
-      })
-      .then((data: unknown) => {
-        const crons: CronJob[] = Array.isArray(data)
-          ? data
-          : (data as { crons?: CronJob[] })?.crons ?? [];
+    fetchCronsCached()
+      .then(({ crons }) => {
         setCronCount(crons.length);
         setCronErrorCount(crons.filter((c) => c.status === 'error').length);
       })

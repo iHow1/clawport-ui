@@ -5,6 +5,7 @@ import { Map, MessageSquare, Columns3, Clock, Brain, Mic, Check, Keyboard, Alert
 import { useSettings } from '@/app/settings-provider'
 import { useTheme } from '@/app/providers'
 import { THEMES } from '@/lib/themes'
+import { fetchAgentsCached, fetchCronsCached } from '@/lib/client-api'
 import { fetchOnboarded, syncOnboarded } from '@/lib/conversations'
 
 // ---------------------------------------------------------------------------
@@ -127,14 +128,10 @@ export function OnboardingWizard({ forceOpen, onClose }: OnboardingWizardProps) 
     setCronsError(null)
 
     // Check agents
-    fetch('/api/agents')
-      .then(r => {
-        if (!r.ok) throw new Error(`HTTP ${r.status}`)
-        return r.json()
-      })
-      .then((data: unknown) => {
-        if (Array.isArray(data) && data.length > 0) {
-          setAgents(data.map((a: Record<string, unknown>) => ({
+    fetchAgentsCached()
+      .then((data) => {
+        if (data.length > 0) {
+          setAgents(data.map((a) => ({
             id: String(a.id ?? ''),
             name: String(a.name ?? ''),
             emoji: String(a.emoji ?? ''),
@@ -152,11 +149,7 @@ export function OnboardingWizard({ forceOpen, onClose }: OnboardingWizardProps) 
       })
 
     // Check crons (validates gateway + openclaw binary)
-    fetch('/api/crons')
-      .then(r => {
-        if (!r.ok) throw new Error(`HTTP ${r.status}`)
-        return r.json()
-      })
+    fetchCronsCached()
       .then(() => {
         setCronsStatus('ok')
       })

@@ -71,16 +71,20 @@ export function SettingsProvider({ children }: { children: React.ReactNode }) {
   // Initialize with defaults so server and client render the same HTML.
   // Hydrate from localStorage after mount to avoid hydration mismatch.
   const [settings, setSettings] = useState<ClawPortSettings>({ ...DEFAULTS })
+  const [hydrated, setHydrated] = useState(false)
 
   useEffect(() => {
     setSettings(loadSettings())
+    setHydrated(true)
   }, [])
 
   const locale = settings.locale
-  const resolvedLocale = resolveLocale(locale, {
-    language: typeof navigator === 'undefined' ? undefined : navigator.language,
-    languages: typeof navigator === 'undefined' ? undefined : navigator.languages,
-  })
+  const resolvedLocale = hydrated
+    ? resolveLocale(locale, {
+        language: typeof navigator === 'undefined' ? undefined : navigator.language,
+        languages: typeof navigator === 'undefined' ? undefined : navigator.languages,
+      })
+    : 'en'
   const copy = getCopy(resolvedLocale)
 
   useEffect(() => {

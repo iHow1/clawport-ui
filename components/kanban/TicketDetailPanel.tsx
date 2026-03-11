@@ -293,6 +293,7 @@ export function TicketDetailPanel({
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
+          requestId: assistantMsgId,
           messages: apiMessages,
           ticket: {
             title: ticket.title,
@@ -322,6 +323,9 @@ export function TicketDetailPanel({
           if (line.startsWith('data: ') && line !== 'data: [DONE]') {
             try {
               const chunk = JSON.parse(line.slice(6))
+              if (chunk.error) {
+                throw new Error(String(chunk.error))
+              }
               if (chunk.content) {
                 fullContent += chunk.content
                 const captured = fullContent
