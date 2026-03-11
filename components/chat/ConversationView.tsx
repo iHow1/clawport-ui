@@ -6,6 +6,7 @@ import type { Conversation, ConversationStore, Message, MediaAttachment } from '
 import { parseMedia, addMessage, updateLastMessage, deleteOnServer } from '@/lib/conversations'
 import { buildApiContent } from '@/lib/multimodal'
 import { generateId } from '@/lib/id'
+import { streamChatCompletion } from '@/lib/chat-stream'
 import { useSettings } from '@/app/settings-provider'
 import { localizeAgentDescription } from '@/lib/i18n'
 import { isSlashInput, matchCommands, parseSlashCommand, executeCommand } from '@/lib/slash-commands'
@@ -382,46 +383,18 @@ export function ConversationView({ agent, conversation, onUpdate, onBack }: Conv
       }))
 
     try {
-      const res = await fetch(`/api/chat/${agent.id}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+      const { content } = await streamChatCompletion({
+        endpoint: `/api/chat/${agent.id}`,
+        body: {
           messages: apiMessages,
           operatorName: settings.operatorName,
           requestId: assistantMsgId,
-        }),
+        },
+        onChunk: (capturedContent) => {
+          onUpdate(agent.id, prev => updateLastMessage(prev, agent.id, assistantMsgId, capturedContent, true))
+        },
       })
-
-      if (!res.ok || !res.body) throw new Error('Stream failed')
-
-      const reader = res.body.getReader()
-      const decoder = new TextDecoder()
-      let buffer = ''
-      let fullContent = ''
-
-      while (true) {
-        const { done, value } = await reader.read()
-        if (done) break
-        buffer += decoder.decode(value, { stream: true })
-        const lines = buffer.split('\n')
-        buffer = lines.pop() || ''
-        for (const line of lines) {
-          if (line.startsWith('data: ') && line !== 'data: [DONE]') {
-            try {
-              const chunk = JSON.parse(line.slice(6))
-              if (chunk.error) {
-                throw new Error(String(chunk.error))
-              }
-              if (chunk.content) {
-                fullContent += chunk.content
-                const capturedContent = fullContent
-                onUpdate(agent.id, prev => updateLastMessage(prev, agent.id, assistantMsgId, capturedContent, true))
-              }
-            } catch { /* skip malformed chunks */ }
-          }
-        }
-      }
-      const finalContent = fullContent || copy.chat.responseError
+      const finalContent = content || copy.chat.responseError
       onUpdate(agent.id, prev => updateLastMessage(prev, agent.id, assistantMsgId, finalContent, false))
     } catch {
       onUpdate(agent.id, prev => updateLastMessage(prev, agent.id, assistantMsgId, copy.chat.responseError, false))

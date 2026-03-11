@@ -7,6 +7,7 @@ import type { KanbanTicket, TicketStatus, TicketPriority } from '@/lib/kanban/ty
 import { PRIORITY_COLORS } from '@/lib/kanban/types'
 import { AgentAvatar } from '@/components/AgentAvatar'
 import { generateId } from '@/lib/id'
+import { streamChatCompletion } from '@/lib/chat-stream'
 import { useSettings } from '@/app/settings-provider'
 
 /* ── Chat message type (local to kanban) ─────────────── */
@@ -289,10 +290,9 @@ export function TicketDetailPanel({
     const apiMessages = allMessages.map(m => ({ role: m.role, content: m.content }))
 
     try {
-      const res = await fetch(`/api/kanban/chat/${agent.id}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+      const { content } = await streamChatCompletion({
+        endpoint: `/api/kanban/chat/${agent.id}`,
+        body: {
           requestId: assistantMsgId,
           messages: apiMessages,
           ticket: {
@@ -303,45 +303,18 @@ export function TicketDetailPanel({
             assigneeRole: ticket.assigneeRole,
             workResult: ticket.workResult,
           },
-        }),
+        },
+        onChunk: (captured) => {
+          setMessages(prev =>
+            prev.map(m => m.id === assistantMsgId
+              ? { ...m, content: captured, isStreaming: true }
+              : m
+            )
+          )
+        },
       })
 
-      if (!res.ok || !res.body) throw new Error(detailCopy.streamFailed)
-
-      const reader = res.body.getReader()
-      const decoder = new TextDecoder()
-      let buffer = ''
-      let fullContent = ''
-
-      while (true) {
-        const { done, value } = await reader.read()
-        if (done) break
-        buffer += decoder.decode(value, { stream: true })
-        const lines = buffer.split('\n')
-        buffer = lines.pop() || ''
-        for (const line of lines) {
-          if (line.startsWith('data: ') && line !== 'data: [DONE]') {
-            try {
-              const chunk = JSON.parse(line.slice(6))
-              if (chunk.error) {
-                throw new Error(String(chunk.error))
-              }
-              if (chunk.content) {
-                fullContent += chunk.content
-                const captured = fullContent
-                setMessages(prev =>
-                  prev.map(m => m.id === assistantMsgId
-                    ? { ...m, content: captured, isStreaming: true }
-                    : m
-                  )
-                )
-              }
-            } catch { /* skip malformed chunks */ }
-          }
-        }
-      }
-
-      const finalContent = fullContent
+      const finalContent = content
       setMessages(prev =>
         prev.map(m => m.id === assistantMsgId
           ? { ...m, content: finalContent, isStreaming: false }

@@ -18,6 +18,7 @@ import { RefreshCw, Activity, ChevronDown, MessageSquare, Trash2 } from "lucide-
 import type { Agent, CronJob } from "@/lib/types"
 import type { Pipeline } from "@/lib/cron-pipelines"
 import { getAllPipelineJobNames } from "@/lib/cron-pipelines"
+import { streamChatCompletion } from "@/lib/chat-stream"
 import { formatDuration } from "@/lib/cron-utils"
 import { buildPipelineLayout, buildHealthCheckPrompt, extractJobNameFromNodeId } from "@/lib/pipeline-utils"
 import { generateId } from "@/lib/id"
@@ -426,37 +427,16 @@ export function PipelineGraph({ crons, agents, pipelines, onSetupClick, onEditCl
     const prompt = buildHealthCheckPrompt(crons, pipelines, agents)
 
     try {
-      const res = await fetch(`/api/chat/${rootAgent.id}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ messages: [{ role: "user", content: prompt }] }),
+      await streamChatCompletion({
+        endpoint: `/api/chat/${rootAgent.id}`,
+        body: {
+          messages: [{ role: "user", content: prompt }],
+          requestId: `pipeline-health-${Date.now()}`,
+        },
+        onChunk: (fullContent) => {
+          setHealthCheckContent(fullContent)
+        },
       })
-
-      if (!res.ok || !res.body) throw new Error("Stream failed")
-
-      const reader = res.body.getReader()
-      const decoder = new TextDecoder()
-      let buffer = ""
-      let fullContent = ""
-
-      while (true) {
-        const { done, value } = await reader.read()
-        if (done) break
-        buffer += decoder.decode(value, { stream: true })
-        const lines = buffer.split("\n")
-        buffer = lines.pop() || ""
-        for (const line of lines) {
-          if (line.startsWith("data: ") && line !== "data: [DONE]") {
-            try {
-              const chunk = JSON.parse(line.slice(6))
-              if (chunk.content) {
-                fullContent += chunk.content
-                setHealthCheckContent(fullContent)
-              }
-            } catch { /* skip malformed chunks */ }
-          }
-        }
-      }
     } catch {
       setHealthCheckContent(prev => prev + `\n\n${pipelinesCopy.healthCheck.connectError}`)
     } finally {
@@ -487,45 +467,23 @@ export function PipelineGraph({ crons, agents, pipelines, onSetupClick, onEditCl
     ]
 
     try {
-      const res = await fetch(`/api/chat/${rootAgent.id}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ messages: apiMessages }),
+      const { content } = await streamChatCompletion({
+        endpoint: `/api/chat/${rootAgent.id}`,
+        body: {
+          messages: apiMessages,
+          requestId: assistantMsgId,
+        },
+        onChunk: (captured) => {
+          setHealthChatMessages(prev =>
+            prev.map(m => m.id === assistantMsgId
+              ? { ...m, content: captured, isStreaming: true }
+              : m
+            )
+          )
+        },
       })
 
-      if (!res.ok || !res.body) throw new Error("Stream failed")
-
-      const reader = res.body.getReader()
-      const decoder = new TextDecoder()
-      let buffer = ""
-      let fullContent = ""
-
-      while (true) {
-        const { done, value } = await reader.read()
-        if (done) break
-        buffer += decoder.decode(value, { stream: true })
-        const lines = buffer.split("\n")
-        buffer = lines.pop() || ""
-        for (const line of lines) {
-          if (line.startsWith("data: ") && line !== "data: [DONE]") {
-            try {
-              const chunk = JSON.parse(line.slice(6))
-              if (chunk.content) {
-                fullContent += chunk.content
-                const captured = fullContent
-                setHealthChatMessages(prev =>
-                  prev.map(m => m.id === assistantMsgId
-                    ? { ...m, content: captured, isStreaming: true }
-                    : m
-                  )
-                )
-              }
-            } catch { /* skip malformed chunks */ }
-          }
-        }
-      }
-
-      const finalContent = fullContent
+      const finalContent = content
       setHealthChatMessages(prev =>
         prev.map(m => m.id === assistantMsgId
           ? { ...m, content: finalContent, isStreaming: false }
